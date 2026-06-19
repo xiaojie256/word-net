@@ -182,7 +182,49 @@
     let startPos = { x: 0, y: 0 }; let lastPos = { x: 0, y: 0 };
     let longPressTimer = null; let drawEdgeFromId = null;
     let selectionMode = false; let selectionRect = null; let selectedIds = new Set();
-    let isSelecting = false; let multiDragStart = null; let shiftHeld = false;
+    let isSelecting = false; let multiDragStart = null;
+
+    function isDesktopPointerEvent(e) {
+      return !e.touches;
+    }
+
+    function shouldBoxSelect(e) {
+      return selectionMode || (isDesktopPointerEvent(e) && e.shiftKey === true);
+    }
+
+    function setSelectionMode(enabled) {
+      selectionMode = !!enabled;
+      el('selectModeBtn').classList.toggle('active', selectionMode);
+      if (!selectionMode) {
+        el('shortcutHint').classList.remove('visible');
+      }
+    }
+
+    function resetInteractionState({ clearSelected = false } = {}) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+
+      isDrawing = false;
+      isPanning = false;
+      isSelecting = false;
+      dragTarget = null;
+      multiDragStart = null;
+      selectionRect = null;
+      drawEdgeFromId = null;
+      pinch.active = false;
+
+      el('ctxMenu').style.display = 'none';
+      setSelectionMode(false);
+
+      if (clearSelected) {
+        selectedIds.clear();
+        selectedId = null;
+        el('nodeNote').value = '';
+        updateBatchToolbar();
+      }
+
+      render();
+    }
     let pinch = { active: false, startDist: 0, startScale: 1, center: { x: 0, y: 0 } };
 
     // 新增状态控制
@@ -289,7 +331,15 @@
         el('nodeInput').value = ''; el('nodeNote').value = '';
         save(); render(); if (window.innerWidth < 860) { el('panel').classList.remove('open'); syncToggleBtn(); }
     }
-    function clearSelection() { selectedIds.clear(); selectedId = null; el('nodeNote').value = ''; updateBatchToolbar(); render(); }
+    function clearSelection() {
+      selectedIds.clear();
+      selectedId = null;
+      selectionRect = null;
+      isSelecting = false;
+      el('nodeNote').value = '';
+      updateBatchToolbar();
+      render();
+    }
 
     function render() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -326,16 +376,47 @@
         const p = getPos(e), w = toWorld(p.x, p.y);
         lastPos = p; startPos = p;
         const hit = nodes.find(n => Math.hypot(n.x - w.x, n.y - w.y) < 34);
+        const boxSelect = shouldBoxSelect(e);
         if (drawEdgeFromId !== null) { if (hit && hit.id !== drawEdgeFromId) { if (!edges.find(e2 => (e2.from === drawEdgeFromId && e2.to === hit.id) || (e2.from === hit.id && e2.to === drawEdgeFromId))) { edges.push({ from: drawEdgeFromId, to: hit.id }); } } drawEdgeFromId = null; render(); return; }
         if (hit) {
-            if (selectedIds.size > 1 && selectedIds.has(hit.id)) { multiDragStart = { nodePositions: nodes.filter(n => selectedIds.has(n.id)).map(n => ({ id: n.id, x: n.x, y: n.y })), worldStart: { x: w.x, y: w.y } }; isDrawing = true; return; }
-            if (shiftHeld || selectionMode) { if (selectedIds.has(hit.id)) { selectedIds.delete(hit.id); } else { selectedIds.add(hit.id); } selectedId = hit.id; el('nodeNote').value = hit.note || ""; updateBatchToolbar(); render(); return; }
+          if (!boxSelect && selectedIds.size > 1 && selectedIds.has(hit.id)) {
+            multiDragStart = {
+              nodePositions: nodes
+                .filter(n => selectedIds.has(n.id))
+                .map(n => ({ id: n.id, x: n.x, y: n.y })),
+              worldStart: { x: w.x, y: w.y }
+            };
+            isDrawing = true;
+            return;
+          }
+
+          if (boxSelect) {
+            if (selectedIds.has(hit.id)) {
+              selectedIds.delete(hit.id);
+            } else {
+              selectedIds.add(hit.id);
+            }
+            selectedId = hit.id;
+            el('nodeNote').value = hit.note || "";
+            updateBatchToolbar();
+            render();
+            return;
+          }
             isDrawing = true; dragTarget = hit; selectedId = hit.id; selectedIds.clear(); selectedIds.add(hit.id); updateBatchToolbar();
             el('nodeNote').value = hit.note || "";
             longPressTimer = setTimeout(() => { showMenu(p.clientX, p.clientY, hit.id); isDrawing = false; }, 600);
         } else {
-            if (shiftHeld || selectionMode) { isSelecting = true; selectionRect = { x1: p.x, y1: p.y, x2: p.x, y2: p.y }; el('ctxMenu').style.display = 'none'; }
-            else { if (selectedIds.size > 1) clearSelection(); isPanning = true; el('ctxMenu').style.display = 'none'; }
+
+          if (boxSelect) {
+            isSelecting = true;
+            selectionRect = { x1: p.x, y1: p.y, x2: p.x, y2: p.y };
+            el('ctxMenu').style.display = 'none';
+          } else {
+            if (selectedIds.size > 1) clearSelection();
+            isPanning = true;
+            el('ctxMenu').style.display = 'none';
+          }
+
         }
     };
 
@@ -362,20 +443,50 @@
     canvas.addEventListener('mousedown', onStart); window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onEnd);
     canvas.addEventListener('touchstart', onStart, { passive: false }); window.addEventListener('touchmove', onMove, { passive: false }); window.addEventListener('touchend', onEnd);
 
-    window.addEventListener('keydown', (e) => { if (e.key === 'Shift') shiftHeld = true; if (e.key === 'Escape') { clearSelection(); el('shortcutHint').classList.remove('visible'); } if (e.key === 'Delete' && selectedIds.size > 1) deleteSelectedNodes(); });
-    window.addEventListener('keyup', (e) => { if (e.key === 'Shift') shiftHeld = false; });
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        resetInteractionState({ clearSelected: true });
+        return;
+      }
+
+      if (e.key === 'Delete' && selectedIds.size > 1) {
+        deleteSelectedNodes();
+      }
+    });
+
+    window.addEventListener('blur', () => {
+      resetInteractionState();
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        resetInteractionState();
+      }
+    });
 
     canvas.addEventListener('wheel', (e) => { e.preventDefault(); const r = canvas.getBoundingClientRect(); const lx = e.clientX - r.left, ly = e.clientY - r.top; const wb = toWorld(lx, ly); let ns = camera.scale * (e.deltaY > 0 ? 0.9 : 1.1); ns = Math.max(0.2, Math.min(ns, 5)); camera.scale = ns; camera.x = lx - wb.x * camera.scale; camera.y = ly - wb.y * camera.scale; render(); save(); }, { passive: false });
 
     let selectModeBtnTimeout = null;
-    el('selectModeBtn').onclick = () => { selectionMode = !selectionMode; el('selectModeBtn').classList.toggle('active', selectionMode); const hint = el('shortcutHint'); if (selectionMode) { hint.classList.add('visible'); clearTimeout(selectModeBtnTimeout); selectModeBtnTimeout = setTimeout(() => hint.classList.remove('visible'), 3000); } else { hint.classList.remove('visible'); } };
+    el('selectModeBtn').onclick = () => {
+      setSelectionMode(!selectionMode);
+
+      const hint = el('shortcutHint');
+      clearTimeout(selectModeBtnTimeout);
+
+      if (selectionMode) {
+        hint.classList.add('visible');
+        selectModeBtnTimeout = setTimeout(() => {
+          hint.classList.remove('visible');
+        }, 3000);
+      }
+    };
 
     function deleteSelectedNodes() { const ids = new Set(selectedIds); nodes = nodes.filter(n => !ids.has(n.id)); edges = edges.filter(e => !ids.has(e.from) && !ids.has(e.to)); selectedIds.clear(); selectedId = null; updateBatchToolbar(); save(); render(); }
 
     el('batchConnect').onclick = () => { const ids = [...selectedIds]; let added = 0; for (let i = 0; i < ids.length; i++) { for (let j = i + 1; j < ids.length; j++) { const a = ids[i], b = ids[j]; if (!edges.find(e => (e.from === a && e.to === b) || (e.from === b && e.to === a))) { edges.push({ from: a, to: b }); added++; } } } if (added > 0) { save(); render(); } };
     el('batchDisconnect').onclick = () => { const ids = selectedIds; const before = edges.length; edges = edges.filter(e => !(ids.has(e.from) && ids.has(e.to))); if (edges.length !== before) { save(); render(); } };
     el('batchDelete').onclick = () => { if (confirm('确定删除选中的 ' + selectedIds.size + ' 个节点？')) deleteSelectedNodes(); };
-    el('batchDeselect').onclick = () => clearSelection();
+    el('batchDeselect').onclick = () => resetInteractionState({ clearSelected: true });
 
     function syncToggleBtn() { el('toggleOpen').style.display = el('panel').classList.contains('open') ? 'none' : ''; }
     el('toggleOpen').onclick = () => { el('panel').classList.add('open'); if (window.innerWidth < 860) el('overlay').classList.add('active'); syncToggleBtn(); };
@@ -388,7 +499,28 @@
     el('connectBtn').onclick = () => { const a = parseInt(el('nodeA').value), b = parseInt(el('nodeB').value); if (!isNaN(a) && !isNaN(b) && a !== b) { if (!edges.find(e => (e.from === a && e.to === b) || (e.from === b && e.to === a))) { edges.push({ from: a, to: b }); save(); render(); } } };
     el('disconnectBtn').onclick = () => { const a = parseInt(el('nodeA').value), b = parseInt(el('nodeB').value); edges = edges.filter(e => !((e.from === a && e.to === b) || (e.from === b && e.to === a))); save(); render(); };
     el('nodeNote').oninput = (e) => { const n = nodes.find(i => i.id === selectedId); if (n) { n.note = e.target.value; save(); render(); } };
-    el('clearBtn').onclick = () => { if (confirm('清空所有？')) { nodes = []; edges = []; nextId = 0; layers = []; currentLayerId = 'default'; isSorted = false; originalPositions = []; selectedIds.clear(); selectedId = null; updateBatchToolbar(); updateLayerUI(); save(); render(); } };
+    el('clearBtn').onclick = () => {
+      if (confirm('清空所有？')) {
+        nodes = [];
+        edges = [];
+        nextId = 0;
+        layers = [];
+        currentLayerId = 'default';
+        isSorted = false;
+        originalPositions = [];
+
+        selectedIds.clear();
+        selectedId = null;
+        selectionRect = null;
+        isSelecting = false;
+        setSelectionMode(false);
+
+        updateBatchToolbar();
+        updateLayerUI();
+        save();
+        render();
+      }
+    };
 
     function showMenu(x, y, id) { const m = el('ctxMenu'); m.style.display = 'block'; let left = x, top = y; if (left + 160 > window.innerWidth) left = window.innerWidth - 168; if (top + 140 > window.innerHeight) top = window.innerHeight - 148; m.style.left = left + 'px'; m.style.top = top + 'px'; drawEdgeFromId = id; }
     el('menuConn').onclick = () => { el('ctxMenu').style.display = 'none'; render(); };
@@ -616,4 +748,36 @@
         }
     };
 
-    // 🚨 移动端硬核修复：阻止控制面板内（包�
+    // 🚨 移动端硬核修复：阻止控制面板内（包括注释框）的所有触摸事件冒泡到 Canvas 画布上
+    // 从而彻底恢复侧边栏菜单和注释框在手机上的原生滑动与滚动能力
+    const panelEl = el('panel');
+    if (panelEl) {
+        ['touchstart', 'touchmove', 'touchend', 'touchcancel'].forEach(evtType => {
+            panelEl.addEventListener(evtType, (e) => {
+                // 核心修复：彻底切断面板内所有元素的手势冒泡，防止底层画布截获并干扰滚动
+                e.stopPropagation();
+            }, { passive: true });
+        });
+    }
+
+    async function initApp() {
+        try {
+            const response = await fetch('https://wordnet-api.xiaojie256.icu/load');
+            if (response.ok) {
+                const p = await response.json();
+                const norm = normalizeLoadedData(p);
+                nodes = norm.nodes; edges = norm.edges;
+                nextId = typeof p.nextId === 'number' ? p.nextId : norm.nextId;
+                camera = p.camera || norm.camera;
+                layers = norm.layers; currentLayerId = norm.currentLayerId;
+            } else { load(); }
+        } catch (err) { load(); }
+        setTimeout(resize, 100);
+        updateSelects();
+        updateLayerUI();
+    }
+    initApp();
+})();
+</script>
+</body>
+</html>
